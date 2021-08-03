@@ -8,6 +8,7 @@ import (
 	"github.com/influxdata/flux/execute"
 	"github.com/influxdata/flux/execute/table"
 	"github.com/influxdata/flux/execute/table/static"
+	"github.com/influxdata/flux/mock"
 )
 
 func TestProcessMsg(t *testing.T) {
@@ -161,4 +162,144 @@ func TestProcessChunkMsg(t *testing.T) {
 		t.Errorf("unexpected error: %s", err)
 	}
 	mem.AssertSize(t, 0)
+}
+
+func TestWrapTransformationInTransport(t *testing.T) {
+	want := static.TableGroup{
+		static.StringKey("_m", "m0"),
+		static.StringKeys("t0", "a", "b"),
+		static.Times("_time", 0, 10, 20),
+		static.Floats("_value", 0, 1, 2),
+	}
+
+	t.Run("FlushKey", func(t *testing.T) {
+		var (
+			got      table.Iterator
+			finished bool
+		)
+
+		tr := execute.WrapTransformationInTransport(&mock.Transformation{
+			ProcessFn: func(id execute.DatasetID, tbl flux.Table) error {
+				buf, err := table.Copy(tbl)
+				if err != nil {
+					return err
+				}
+				got = append(got, buf)
+				return nil
+			},
+			FinishFn: func(id execute.DatasetID, err error) {
+				if err != nil {
+					t.Error(err)
+				}
+				finished = true
+			},
+		}, memory.DefaultAllocator)
+
+		processed := 0
+		if err := want.Do(func(tbl flux.Table) error {
+			if err := tbl.Do(func(cr flux.ColReader) error {
+				chunk := table.ChunkFromReader(cr)
+				chunk.Retain()
+				m := execute.NewProcessChunkMsg(chunk)
+				return tr.ProcessMessage(m)
+			}); err != nil {
+				return err
+			}
+
+			if got, want := len(got), processed; got != want {
+				t.Errorf("wrong number of tables processed -want/+got:\n\t- %d\n\t+ %d", want, got)
+			}
+
+			m := execute.NewFlushKeyMsg(tbl.Key())
+			if err := tr.ProcessMessage(m); err != nil {
+				return err
+			}
+			processed++
+
+			if got, want := len(got), processed; got != want {
+				t.Errorf("wrong number of tables processed -want/+got:\n\t- %d\n\t+ %d", want, got)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		m := execute.NewFinishMsg(nil)
+		if err := tr.ProcessMessage(m); err != nil {
+			t.Fatal(err)
+		}
+
+		if !finished {
+			t.Error("finish message not received")
+		}
+
+		if diff := table.Diff(want, got); diff != "" {
+			t.Errorf("unexpected table data -want/+got:\n%s", diff)
+		}
+	})
+
+	t.Run("Finish", func(t *testing.T) {
+		var (
+			got      table.Iterator
+			finished bool
+		)
+
+		tr := execute.WrapTransformationInTransport(&mock.Transformation{
+			ProcessFn: func(id execute.DatasetID, tbl flux.Table) error {
+				buf, err := table.Copy(tbl)
+				if err != nil {
+					return err
+				}
+				got = append(got, buf)
+				return nil
+			},
+			FinishFn: func(id execute.DatasetID, err error) {
+				if err != nil {
+					t.Error(err)
+				}
+				finished = true
+			},
+		}, memory.DefaultAllocator)
+
+		processed := 0
+		if err := want.Do(func(tbl flux.Table) error {
+			if err := tbl.Do(func(cr flux.ColReader) error {
+				chunk := table.ChunkFromReader(cr)
+				chunk.Retain()
+				m := execute.NewProcessChunkMsg(chunk)
+				return tr.ProcessMessage(m)
+			}); err != nil {
+				return err
+			}
+			processed++
+
+			if got, want := len(got), 0; got != want {
+				t.Errorf("wrong number of tables processed -want/+got:\n\t- %d\n\t+ %d", want, got)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, want := len(got), 0; got != want {
+			t.Errorf("wrong number of tables processed -want/+got:\n\t- %d\n\t+ %d", want, got)
+		}
+
+		m := execute.NewFinishMsg(nil)
+		if err := tr.ProcessMessage(m); err != nil {
+			t.Fatal(err)
+		}
+
+		if !finished {
+			t.Error("finish message not received")
+		}
+
+		if got, want := len(got), processed; got != want {
+			t.Errorf("wrong number of tables processed -want/+got:\n\t- %d\n\t+ %d", want, got)
+		}
+
+		if diff := table.Diff(want, got); diff != "" {
+			t.Errorf("unexpected table data -want/+got:\n%s", diff)
+		}
+	})
 }
