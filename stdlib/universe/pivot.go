@@ -48,7 +48,7 @@ func init() {
 	execute.RegisterTransformation(PivotKind, createPivotTransformation)
 
 	// optimized pivot
-	execute.RegisterTransformation(SortedPivotKind, createPivotTransformation)
+	execute.RegisterTransformation(SortedPivotKind, createSortedPivotTransformation)
 }
 
 func createPivotOpSpec(args flux.Arguments, a *flux.Administration) (flux.OperationSpec, error) {
@@ -420,6 +420,7 @@ type SortedPivotProcedureSpec struct {
 func (s *SortedPivotProcedureSpec) Kind() plan.ProcedureKind {
 	return SortedPivotKind
 }
+
 func (s *SortedPivotProcedureSpec) Copy() plan.ProcedureSpec {
 	ns := new(SortedPivotProcedureSpec)
 	ns.RowKey = make([]string, len(s.RowKey))
@@ -428,6 +429,18 @@ func (s *SortedPivotProcedureSpec) Copy() plan.ProcedureSpec {
 	copy(ns.ColumnKey, s.ColumnKey)
 	ns.ValueColumn = s.ValueColumn
 	return ns
+}
+
+func createSortedPivotTransformation(id execute.DatasetID, mode execute.AccumulationMode, spec plan.ProcedureSpec, a execute.Administration) (execute.Transformation, execute.Dataset, error) {
+	s, ok := spec.(*SortedPivotProcedureSpec)
+	if !ok {
+		return nil, nil, errors.Newf(codes.Internal, "invalid spec type %T", spec)
+	}
+	t, dataset, err := newSortedPivotTransformation(a.Context(), *s, id, a.Allocator())
+	if err != nil {
+		return nil, nil, err
+	}
+	return t, dataset, nil
 }
 
 // sortedPivotTransformation is an optimized version of pivot.
@@ -536,7 +549,7 @@ func (t *sortedPivotTransformation) Process(id execute.DatasetID, tbl flux.Table
 		colLabel := cr.Key().LabelValue(colKey)
 
 		if colLabel == nil {
-			// The column colLabel is not part of the group colLabel
+			// The column key is not part of the group key
 			// so it does not have a consistent value.
 			// This is possible for us to do, but it requires
 			// regrouping the input and that is not implemented yet.
